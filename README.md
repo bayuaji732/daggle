@@ -1,26 +1,27 @@
 <div align="center">
   <h1>Daggle</h1>
   <p><b>The Dataset Layer for Machine Learning Workflows</b></p>
-  <p><i>GitHub for ML datasets &nbsp;&nbsp;+&nbsp;&nbsp; Kaggle dataset UX &nbsp;&nbsp;+&nbsp;&nbsp; Notebook-ready sync</i></p>
+  <p><i>Self-hosted dataset registry &nbsp;·&nbsp; Versioned uploads &nbsp;·&nbsp; In-browser file preview &nbsp;·&nbsp; One-click JupyterHub mounting</i></p>
 </div>
 
 ---
 
 ## 📖 The Story: Why Daggle?
 
-Managing datasets for Machine Learning is often chaotic. Data scientists frequently deal with duplicated data, lost versions, and messy folder structures (e.g., `data_v2_final_final.csv`). Sharing these datasets across teams or syncing them into Kubeflow clusters is full of friction, often requiring manual downloads, custom scripts, and a lot of wasted time.
+Managing datasets for Machine Learning is often chaotic. Data scientists frequently deal with duplicated files, lost versions, and messy folder structures (e.g., `data_v2_final_final.csv`). Sharing datasets across teams or loading them into notebook environments is full of friction — manual downloads, custom scripts, and a lot of wasted time just getting the data in the right place.
 
-We built **Daggle** to bring order to this chaos. Daggle provides a seamless platform that gives your team the rigorous version control of GitHub, combined with the intuitive dataset exploration of Kaggle. Instead of wrestling with infrastructure or fighting duplicate data files, your team can focus on what matters most: building better models with reliable, reproducible data.
+**Daggle** solves this by providing a centralized, self-hosted dataset registry where every upload is automatically versioned, stored, and indexed. Datasets are browsable through a web UI with in-browser file preview (CSV, images, JSON, PDF, and more). When a data scientist is ready to work, they click **"Open in Notebook"** and their dataset is automatically mounted — read-only — directly into their JupyterHub session at `/home/jovyan/input`. No downloads, no copy-paste paths, no scripts.
 
-## 🚀 Advanced Features & Strategy
+## 🚀 How It Works
 
-Daggle is built to work seamlessly in the background. Our architecture ensures that from the moment a dataset is uploaded to the moment it's queried in a Jupyter Notebook, the experience is fast, reliable, and frictionless.
+Daggle is built to stay out of your way. From the moment a dataset is uploaded to the moment it is available in a notebook, everything is handled automatically.
 
-*   **Content-Addressable Storage (CAS)**: Under the hood, Daggle employs a robust CAS strategy for dataset versioning. This ensures absolute reproducibility for your ML pipelines without wasting disk space on duplicated files. Every version is tracked, immutable, and deduplicated efficiently.
-*   **S3-Compatible Core (RustFS)**: We use RustFS as our native object storage, meaning Daggle is fully S3-compatible from day one. Data scientists don't need to learn a new API; they can connect to their datasets directly from Jupyter Notebooks using standard tools like `boto3` or AWS CLI.
-*   **Automated Data Processing**: Upload a massive ZIP file, and our asynchronous Celery workers automatically extract it, compute file statistics, and generate rich data previews. The heavy lifting happens invisibly, leaving the UI lightning-fast and the dataset instantly ready-to-use.
-*   **Rich Metadata & Tagging System**: Organize your data ecosystem effortlessly. Add rich metadata and tags to make datasets easily discoverable across your entire organization.
-*   **Zero-Friction Authentication (OIDC)**: Built on an OIDC backend-proxy pattern with Keycloak. Tokens are handled securely server-side, providing seamless Single Sign-On (SSO) that integrates effortlessly with your existing Kubeflow deployments or enterprise identity providers.
+*   **Automatic Versioning with Deduplication (CAS)**: Every upload creates a new immutable version (`v1`, `v2`, ...). Files are stored using content-addressable storage — if the same file exists across multiple versions, it is stored only once on disk. No wasted storage, full history preserved.
+*   **ZIP Auto-Extraction & Indexing**: Upload a ZIP archive and Daggle automatically extracts it, indexes every file inside, computes sizes and types, and makes them individually browsable and downloadable — no manual unpacking required.
+*   **In-Browser File Preview**: Browse dataset contents directly in the web UI. CSV/TSV/Parquet files render as a scrollable data table. Images display inline. JSON, text, PDF, and DOCX files are all supported without downloading anything.
+*   **One-Click Notebook Mounting**: Click "Open in Notebook" on any dataset page. Daggle stops any running notebook session, spawns a fresh JupyterHub container, and bind-mounts the selected dataset version to `/home/jovyan/input` as read-only. The dataset is immediately available — no download, no path configuration.
+*   **Tag & Search**: Assign tags to datasets to make them searchable across your team's entire dataset registry. Filter by visibility (public/private) and search by name or tag from the Explore page.
+*   **Secure Authentication (OIDC)**: Authentication is handled via Keycloak using an OIDC backend-proxy pattern. The frontend never sees tokens — all token exchange happens server-side and is stored in an `HttpOnly` session cookie. Works with an existing Kubeflow Keycloak deployment by changing two environment variables.
 
 ---
 
@@ -266,21 +267,25 @@ Monitor tasks at http://flower.localhost.
 
 ---
 
-## 🎯 MVP Scope
+## 🎯 What Is Included
 
-**Included:**
-- ✅ Dataset upload (ZIP, CSV, Parquet)
-- ✅ Dataset versioning (`v1`, `v2`, ...)
-- ✅ Metadata + tags
-- ✅ ZIP auto-extraction
-- ✅ Dataset preview
-- ✅ Keycloak OIDC auth
+**Currently working:**
+- ✅ Dataset upload (ZIP, CSV, Parquet, images, JSON, PDF, DOCX, audio, video)
+- ✅ Automatic ZIP extraction and per-file indexing
+- ✅ Dataset versioning (`v1`, `v2`, ...) with full history
+- ✅ In-browser file preview (tabular, image, text, PDF, DOCX)
+- ✅ Metadata, description (Markdown), and tags
+- ✅ Public / private visibility control
+- ✅ Per-file and full-dataset download
+- ✅ One-click dataset mounting into JupyterHub at `/home/jovyan/input`
+- ✅ Automatic idle notebook culling (servers stop after 60 min of inactivity)
+- ✅ Keycloak OIDC authentication with SSO
+- ✅ Admin panel for dataset management
 
-**Not in MVP:**
-- ❌ Notebook runtime
-- ❌ Kubeflow replacement
-- ❌ AutoML / pipelines
-- ❌ Distributed training
+**Not included (out of scope):**
+- ❌ Built-in notebook execution environment (JupyterHub is a separate deployment)
+- ❌ Automated ML pipelines or training orchestration
+- ❌ Distributed compute or GPU scheduling
 
 ---
 
