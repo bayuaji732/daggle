@@ -1,0 +1,10 @@
+FROM jupyterhub/jupyterhub:4.1.0
+
+# Install DockerSpawner and generic OAuthenticator
+RUN pip install --no-cache-dir \
+    dockerspawner \
+    oauthenticator \
+    jupyterhub-idle-culler
+
+# Use the config file
+CMD ["jupyterhub", "-f", "/srv/jupyterhub/jupyterhub_config.py"]

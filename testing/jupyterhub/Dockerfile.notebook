@@ -1,0 +1,8 @@
+FROM jupyter/minimal-notebook:latest
+
+# Install requests for the extension to talk to the Daggle API
+RUN pip install requests
+
+USER root
+
+USER ${NB_UID}

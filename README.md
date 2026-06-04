@@ -45,16 +45,19 @@ Daggle is built to work seamlessly in the background. Our architecture ensures t
 
 ```bash
 # 1. Clone
-git clone <repo> daggle && cd daggle
+git clone https://github.com/bayuaji732/daggle.git
 
-# 2. Copy env and fill in secrets
+# 2. cd daggle
+cd daggle
+
+# 3. Copy env and fill in secrets
 cp .env.example .env
 
-# 3. Start all services
+# 4. Start all services
 cd infra
 docker compose --env-file ../.env up -d
 
-# 4. Start frontend (new terminal, from repo root)
+# 5. Start frontend (new terminal, from repo root)
 cd frontend && npm install && npm run dev
 ```
 

@@ -1,0 +1,412 @@
+name: daggle
+
+# -- How to run --
+# Run from the infra/ directory with --env-file pointing to the repo root .env:
+#
+#   cd infra
+#   docker compose --env-file ../.env up -d
+#
+# Why: Docker Compose resolves .env relative to the compose file location (infra/).
+# Your .env is one level up in the repo root, so --env-file ../.env is required.
+
+# ── Networks ───────────────────────────────────────────────────────────
+networks:
+  daggle-net:
+    driver: bridge
+    name: daggle-net
+
+# ── Volumes ────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+  redis_data:
+  rustfs_data:
+  traefik_certs:
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Services
+    # ──────────────────────────────────────────────────────────────────────
+services:
+
+  # ── Traefik (reverse proxy) ─────────────────────────────────────────
+  # v3.3 — stable LTS-aligned minor.
+  # Traefik has no alpine variant; its official image is already minimal.
+  traefik:
+    image: traefik:v3.3
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - "--api.dashboard=true"
+      - "--api.insecure=true" # dashboard on :8080, dev only
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--log.level=INFO"
+      - "--accesslog=true"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik_certs:/certs
+    networks:
+      - daggle-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik-dashboard.rule=Host(`traefik.localhost`)"
+      - "traefik.http.routers.traefik-dashboard.service=api@internal"
+
+  # ── FastAPI Backend ─────────────────────────────────────────────────
+  # Built from backend/Dockerfile (python:3.12-slim — NOT alpine;
+  # pandas + Pillow require glibc and break on alpine/musl).
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: development
+    container_name: backend
+    restart: unless-stopped
+    working_dir: /app
+    command: >-
+      uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    environment:
+      - PYTHONPATH=/app
+      - WATCHFILES_FORCE_POLLING=true
+      # ── Internal service URLs (always docker-network addresses) ──
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - RUSTFS_ENDPOINT=http://rustfs:9000
+      # ── Keycloak (docker-internal URL for local dev) ──────────────
+      # For Kubeflow integration: set KEYCLOAK_URL + KEYCLOAK_REALM in
+      # .env to point at Kubeflow's Keycloak → no code changes needed.
+      - KEYCLOAK_URL=${KEYCLOAK_URL:-http://keycloak:8080}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      rustfs:
+        condition: service_started
+    volumes:
+      - ../backend:/app
+      - ../extracted_datasets:/extracted_datasets
+    networks:
+      - daggle-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.backend.rule=Host(`api.localhost`)"
+      - "traefik.http.routers.backend.entrypoints=web"
+      - "traefik.http.services.backend.loadbalancer.server.port=8000"
+
+  # ── Celery Worker ───────────────────────────────────────────────────
+  worker:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: development
+    container_name: celery-worker
+    restart: unless-stopped
+    command: >
+      celery -A app.workers.celery_app worker --loglevel=info --concurrency=4 --queues=ingestion,processing,sync
+    env_file:
+      - ../.env
+    environment:
+      - PYTHONPATH=/app
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - RUSTFS_ENDPOINT=http://rustfs:9000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rustfs:
+        condition: service_started
+    volumes:
+      - ../backend:/app
+      - ../extracted_datasets:/extracted_datasets
+    networks:
+      - daggle-net
+
+  # ── Celery Beat (periodic tasks) ────────────────────────────────────
+  beat:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: development
+    container_name: celery-beat
+    restart: unless-stopped
+    command: >
+      celery -A app.workers.celery_app beat --loglevel=info
+    env_file:
+      - ../.env
+    environment:
+      - PYTHONPATH=/app
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../backend:/app
+    networks:
+      - daggle-net
+
+  # ── Flower (Celery monitor UI) ──────────────────────────────────────
+  flower:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: development
+    container_name: flower
+    restart: unless-stopped
+    command: >
+      celery -A app.workers.celery_app flower --port=5555 --broker=redis://redis:6379/1
+    env_file:
+      - ../.env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    depends_on:
+      - redis
+      - worker
+    volumes:
+      - ../backend:/app
+    networks:
+      - daggle-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.flower.rule=Host(`flower.localhost`)"
+      - "traefik.http.routers.flower.entrypoints=web"
+      - "traefik.http.services.flower.loadbalancer.server.port=5555"
+
+  # ── Keycloak (OIDC Identity Provider) ──────────────────────────────
+  # 26.1 — current stable stream (KC 26.x, released 2025).
+  # No alpine variant exists. The official Keycloak image is UBI-based (minimal).
+  #
+  # Keycloak stores all data in postgres (no local volume needed).
+  # Uses start-dev mode for local dev (no TLS required).
+  #
+  # ── Kubeflow integration path ────────────────────────────────────────
+  # Option A (recommended): Comment out / remove this service.
+  #   Set in .env:  KEYCLOAK_URL=https://auth.your-kubeflow.example.com
+  #                 KEYCLOAK_REALM=kubeflow
+  #   Register daggle-backend as a new client in Kubeflow's Keycloak realm.
+  #   Zero code changes needed.
+  #
+  # Option B (separate clusters): Keep both. Use Keycloak Identity Brokering
+  #   (admin console → Identity Providers) to federate between them.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.1
+    container_name: keycloak
+    restart: unless-stopped
+    command: start-dev
+    environment:
+      # KC 26: use KC_BOOTSTRAP_* instead of the deprecated KEYCLOAK_ADMIN_*
+      - KC_BOOTSTRAP_ADMIN_USERNAME=${KEYCLOAK_ADMIN:-admin}
+      - KC_BOOTSTRAP_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      - KC_DB=postgres
+      - KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak
+      - KC_DB_USERNAME=${POSTGRES_USER:-postgres}
+      - KC_DB_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - KC_HOSTNAME=http://localhost:8081
+      - KC_HTTP_ENABLED=true
+      - KC_PROXY_HEADERS=xforwarded
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8081:8080"
+    networks:
+      - daggle-net
+    healthcheck:
+      # curl is NOT available in the KC 26 UBI image.
+      # Use bash /dev/tcp to check if port 8080 is accepting connections.
+      # KC 26 in start-dev exposes /health/ready on 8080 once fully booted.
+      test: [ "CMD-SHELL", "bash -c '</dev/tcp/localhost/8080' 2>/dev/null" ]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.keycloak.rule=Host(`auth.localhost`)"
+      - "traefik.http.routers.keycloak.entrypoints=web"
+      - "traefik.http.services.keycloak.loadbalancer.server.port=8080"
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────
+  # 17-alpine — PG17 (current stable, Sept 2024). Alpine is fine for
+  # postgres; it only uses C stdlib, no glibc-specific extensions needed.
+  postgres:
+    image: postgres:17-alpine
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - daggle-net
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-postgres}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ── Redis ───────────────────────────────────────────────────────────
+  # 8-alpine — Redis 8 (current stable, 2025). Alpine is fine;
+  # Redis is pure C, no glibc dependencies.
+  redis:
+    image: redis:8-alpine
+    container_name: redis
+    restart: unless-stopped
+    command: >
+      redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --appendonly yes --appendfilename "appendonly.aof"
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - daggle-net
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── RustFS (S3-compatible object storage) ───────────────────────────
+  # Pinned tags not yet available for RustFS — using :latest.
+  # Track releases at https://github.com/rustfs/rustfs
+  # and pin once versioned tags are published.
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: rustfs
+    restart: unless-stopped
+    environment:
+      - RUSTFS_VOLUMES=/data
+      - RUSTFS_ADDRESS=:9000
+      - RUSTFS_CONSOLE_ADDRESS=:9001
+      - RUSTFS_ACCESS_KEY=${RUSTFS_ACCESS_KEY}
+      - RUSTFS_SECRET_KEY=${RUSTFS_SECRET_KEY}
+    volumes:
+      - rustfs_data:/data
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # Web console
+    networks:
+      - daggle-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.rustfs-api.rule=Host(`storage.localhost`)"
+      - "traefik.http.routers.rustfs-api.entrypoints=web"
+      - "traefik.http.services.rustfs-api.loadbalancer.server.port=9000"
+      - "traefik.http.routers.rustfs-console.rule=Host(`storage-console.localhost`)"
+      - "traefik.http.routers.rustfs-console.entrypoints=web"
+      - "traefik.http.services.rustfs-console.loadbalancer.server.port=9001"
+
+  # ── RustFS bucket init (one-shot) ──────────────────────────────────
+  # Uses amazon/aws-cli (Apache 2.0) — NOT minio/mc.
+  # aws s3 works with any S3-compatible endpoint, including RustFS.
+  rustfs-init:
+    image: amazon/aws-cli:2.22.0
+    container_name: rustfs-init
+    entrypoint: [ "/bin/bash", "-c" ]
+    command:
+      - |
+        sleep 5
+        aws s3 mb s3://datasets          --endpoint-url http://rustfs:9000 2>/dev/null || true
+        aws s3 mb s3://uploads-staging   --endpoint-url http://rustfs:9000 2>/dev/null || true
+        aws s3 mb s3://exports           --endpoint-url http://rustfs:9000 2>/dev/null || true
+        echo 'Buckets ready.'
+    environment:
+      - AWS_ACCESS_KEY_ID=${RUSTFS_ACCESS_KEY}
+      - AWS_SECRET_ACCESS_KEY=${RUSTFS_SECRET_KEY}
+      - AWS_DEFAULT_REGION=us-east-1
+    depends_on:
+      - rustfs
+    networks:
+      - daggle-net
+    restart: "no"
+
+  # ── Frontend (React/Vite) ───────────────────────────────────────────
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      target: development
+    container_name: frontend
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    volumes:
+      - ../frontend:/app
+      - /app/node_modules # Prevent host Windows binaries (e.g., Vite's esbuild) from crashing the Linux container
+    networks:
+      - daggle-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=Host(`app.localhost`, `localhost`)"
+      - "traefik.http.routers.frontend.entrypoints=web"
+      - "traefik.http.services.frontend.loadbalancer.server.port=5173"
+
+  # ── pgAdmin (devtools profile — opt-in) ─────────────────────────────
+  # Pinned to major tag (8.x) — avoids surprise major upgrades,
+  # still gets patch fixes automatically.
+  pgadmin:
+    image: dpage/pgadmin4:8
+    container_name: pgadmin
+    restart: unless-stopped
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_EMAIL}
+      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_PASSWORD}
+      - PGADMIN_CONFIG_SERVER_MODE=False
+      - PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED=False
+    depends_on:
+      - postgres
+    networks:
+      - daggle-net
+    profiles:
+      - devtools
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pgadmin.rule=Host(`pgadmin.localhost`)"
+      - "traefik.http.routers.pgadmin.entrypoints=web"
+      - "traefik.http.services.pgadmin.loadbalancer.server.port=80"
+
+  # ── Redis Commander (devtools profile — opt-in) ──────────────────────
+  redis-commander:
+    image: rediscommander/redis-commander:0.8.0
+    container_name: redis-commander
+    restart: unless-stopped
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    depends_on:
+      - redis
+    networks:
+      - daggle-net
+    profiles:
+      - devtools
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.redis-ui.rule=Host(`redis.localhost`)"
+      - "traefik.http.routers.redis-ui.entrypoints=web"
+      - "traefik.http.services.redis-ui.loadbalancer.server.port=8081"
